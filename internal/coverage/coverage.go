@@ -97,10 +97,13 @@ type DocCheckTask struct {
 }
 
 type Reporter struct {
-	Address   string    `json:"address"`
-	Role      uint32    `json:"-"`
-	Name      string    `json:"name"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Address string `json:"address"`
+	Role    uint32 `json:"-"`
+	Name    string `json:"name"`
+	// ReputationScore is the registry's current score for this reporter. It is
+	// refreshed by reconciliation, not by reporter events, which do not carry it.
+	ReputationScore int32     `json:"reputation_score"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // Result mirrors the contract's Coverage struct.

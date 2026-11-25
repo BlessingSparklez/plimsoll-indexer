@@ -60,6 +60,11 @@ func U32Val(v uint32) xdr.ScVal {
 	return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &u}
 }
 
+func I32Val(v int32) xdr.ScVal {
+	i := xdr.Int32(v)
+	return xdr.ScVal{Type: xdr.ScValTypeScvI32, I32: &i}
+}
+
 // BytesN32Val encodes a 64-char hex string as BytesN<32>.
 func BytesN32Val(hexStr string) (xdr.ScVal, error) {
 	raw, err := hex.DecodeString(hexStr)
@@ -103,6 +108,13 @@ func AsU32(v xdr.ScVal) (uint32, error) {
 		return 0, fmt.Errorf("%w: want u32, got %s", errType, v.Type)
 	}
 	return uint32(*v.U32), nil
+}
+
+func AsI32(v xdr.ScVal) (int32, error) {
+	if v.Type != xdr.ScValTypeScvI32 || v.I32 == nil {
+		return 0, fmt.Errorf("%w: want i32, got %s", errType, v.Type)
+	}
+	return int32(*v.I32), nil
 }
 
 func AsU64(v xdr.ScVal) (uint64, error) {

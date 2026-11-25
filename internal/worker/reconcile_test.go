@@ -21,6 +21,7 @@ type readFake struct {
 	supply    xdr.ScVal
 	reports   map[uint32]xdr.ScVal
 	reporters map[string]xdr.ScVal // keyed by reporter address strkey
+	scores    map[string]int32     // keyed by reporter address strkey
 	errs      map[string]error
 	reads     []string
 }
@@ -53,6 +54,15 @@ func (f *readFake) Read(_ context.Context, _, fn string, args []xdr.ScVal) (xdr.
 			}
 		}
 		return xdr.ScVal{Type: xdr.ScValTypeScvVoid}, nil
+	case "get_reporter_score":
+		if len(args) > 0 {
+			addr, err := soroban.AsAddress(args[0])
+			if err != nil {
+				return xdr.ScVal{}, err
+			}
+			return soroban.I32Val(f.scores[addr]), nil
+		}
+		return soroban.I32Val(0), nil
 	}
 	return xdr.ScVal{}, errors.New("unexpected read " + fn)
 }
@@ -263,6 +273,29 @@ func TestReconcileReportersActiveOnChain(t *testing.T) {
 	}
 	if len(db.inactive) != 0 {
 		t.Errorf("want no inactive marks, got %v", db.inactive)
+	}
+}
+
+// TestReconcileReportersSavesReputationScore proves the registry's current
+// score is part of every reconciled reporter, not only new ones.
+func TestReconcileReportersSavesReputationScore(t *testing.T) {
+	c := &readFake{
+		supply: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		reporters: map[string]xdr.ScVal{
+			testPoster: onChainReporter(t, coverage.RoleAuditor, "Acme Audits"),
+		},
+		scores: map[string]int32{testPoster: 17},
+	}
+	db := &recStore{knownAddrs: []string{testPoster}, newRows: true}
+
+	if err := newReconciler(c, db).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(db.savedReporters) != 1 {
+		t.Fatalf("want 1 saved reporter, got %d", len(db.savedReporters))
+	}
+	if got := db.savedReporters[0].ReputationScore; got != 17 {
+		t.Errorf("reputation score = %d, want 17", got)
 	}
 }
 

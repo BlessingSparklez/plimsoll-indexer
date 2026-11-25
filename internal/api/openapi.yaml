@@ -322,6 +322,70 @@ paths:
                       $ref: '#/components/schemas/Reporter'
                 required:
                   - reporters
+  /v1/reporters/{address}:
+    get:
+      summary: Get a reporter profile including their on-chain reputation score
+      operationId: getReporter
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Reporter account strkey (G...)
+          schema:
+            type: string
+            pattern: '^G[A-Z2-7]{55}$'
+            example: "GAUD..."
+      responses:
+        '200':
+          description: The reporter profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reporter'
+        '400':
+          description: Address is not an account strkey
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Reporter not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/reporters/{address}/score:
+    get:
+      summary: Get a reporter's on-chain reputation score
+      operationId: getReporterScore
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Reporter account strkey (G...)
+          schema:
+            type: string
+            pattern: '^G[A-Z2-7]{55}$'
+            example: "GAUD..."
+      responses:
+        '200':
+          description: The reporter's reputation score
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReporterScore'
+        '400':
+          description: Address is not an account strkey
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Reporter not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /v1/webhooks:
     post:
       summary: Register an issuer TOML change webhook
@@ -674,6 +738,10 @@ components:
         name:
           type: string
           example: "Acme"
+        reputation_score:
+          type: integer
+          format: int32
+          example: 12
         updated_at:
           type: string
           format: date-time
@@ -682,7 +750,21 @@ components:
         - role
         - address
         - name
+        - reputation_score
         - updated_at
+    ReporterScore:
+      type: object
+      properties:
+        address:
+          type: string
+          example: "GAUD..."
+        reputation_score:
+          type: integer
+          format: int32
+          example: 12
+      required:
+        - address
+        - reputation_score
     Webhook:
       type: object
       properties:

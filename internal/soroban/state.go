@@ -35,6 +35,12 @@ func DecodeReporterState(v xdr.ScVal) (*ReporterState, error) {
 	return &ReporterState{Role: role, Name: name}, nil
 }
 
+// DecodeReporterScore reads what get_reporter_score returns: the registry's
+// current score for one reporter.
+func DecodeReporterScore(v xdr.ScVal) (int32, error) {
+	return AsI32(v)
+}
+
 // SupplyState is the coverage ledger's current snapshot for one asset, as
 // get_supply returns it.
 type SupplyState struct {

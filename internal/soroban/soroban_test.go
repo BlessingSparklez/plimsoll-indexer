@@ -52,6 +52,18 @@ func TestI128RoundTrip(t *testing.T) {
 	}
 }
 
+func TestReporterScoreRoundTrip(t *testing.T) {
+	for _, n := range []int32{-25, 0, 12, 1 << 30} {
+		got, err := DecodeReporterScore(I32Val(n))
+		if err != nil || got != n {
+			t.Fatalf("score %d -> %d (%v)", n, got, err)
+		}
+	}
+	if _, err := DecodeReporterScore(U32Val(1)); err == nil {
+		t.Fatal("u32 accepted as an i32 score")
+	}
+}
+
 func TestBytesN32(t *testing.T) {
 	h := strings.Repeat("ab", 32)
 	v, err := BytesN32Val(h)

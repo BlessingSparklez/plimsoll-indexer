@@ -28,12 +28,28 @@ const sac = "CCHPT4TEJDPZQDSUVW3NP6A35ROGV4WEFZKT45SKWYCFZSUB7R5HIM7S"
 // breakdownHash is what a SHA-256 breakdown hash looks like: 64 hex characters.
 var breakdownHash = strings.Repeat("a", 64)
 
+// reporterAddr is a well-formed account strkey that fake knows.
+const reporterAddr = "GBIE3ANCRVCBWETUZXWYKRMP27LQVJHX757XXAQUT3LYHVTNFPPPXEY4"
+
 // unlistedSAC is a well-formed contract strkey that fake holds no asset for.
 func unlistedSAC(t *testing.T) string {
 	t.Helper()
 	raw := make([]byte, 32)
 	raw[0] = 0x01
 	s, err := strkey.Encode(strkey.VersionByteContract, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// unlistedReporter is a well-formed account strkey that fake holds no
+// reporter for.
+func unlistedReporter(t *testing.T) string {
+	t.Helper()
+	raw := make([]byte, 32)
+	raw[0] = 0x02
+	s, err := strkey.Encode(strkey.VersionByteAccountID, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +106,18 @@ func (f *fake) SeriesReports(_ context.Context, s string, _, _ time.Time) ([]cov
 	return f.reportSeries[s], nil
 }
 func (f *fake) Reporters(context.Context) ([]coverage.Reporter, error) {
-	return []coverage.Reporter{{Address: "GAUD", Role: coverage.RoleAuditor, Name: "Acme"}}, nil
+	return []coverage.Reporter{{
+		Address: reporterAddr, Role: coverage.RoleAuditor, Name: "Acme", ReputationScore: 42,
+	}}, nil
+}
+func (f *fake) Reporter(_ context.Context, address string) (coverage.Reporter, error) {
+	if address == reporterAddr {
+		return coverage.Reporter{
+			Address: reporterAddr, Role: coverage.RoleAuditor, Name: "Acme",
+			ReputationScore: 42, UpdatedAt: now,
+		}, nil
+	}
+	return coverage.Reporter{}, store.ErrNotFound
 }
 func (f *fake) Breakdown(_ context.Context, h string) ([]byte, error) {
 	if b, ok := f.bodies[h]; ok {
@@ -245,6 +272,35 @@ func TestListAndMisc(t *testing.T) {
 	}
 	get(t, srv, "/v1/assets/"+sac+"/supply?limit=0", 400)
 	get(t, srv, "/v1/assets/"+sac+"/reports", 200)
+}
+
+func TestReporterProfileIncludesReputationScore(t *testing.T) {
+	srv := server()
+	defer srv.Close()
+
+	body := get(t, srv, "/v1/reporters/"+reporterAddr, 200)
+	if body["reputation_score"].(float64) != 42 || body["role"] != "auditor" || body["name"] != "Acme" {
+		t.Fatalf("profile = %+v", body)
+	}
+
+	score := get(t, srv, "/v1/reporters/"+reporterAddr+"/score", 200)
+	if score["reputation_score"].(float64) != 42 || score["address"] != reporterAddr {
+		t.Fatalf("score = %+v", score)
+	}
+
+	for _, path := range []string{
+		"/v1/reporters/" + unlistedReporter(t),
+		"/v1/reporters/" + unlistedReporter(t) + "/score",
+	} {
+		if body := get(t, srv, path, 404); body["error"] != "reporter not found" {
+			t.Errorf("%s: body %+v", path, body)
+		}
+	}
+	for _, path := range []string{"/v1/reporters/not-an-address", "/v1/reporters/not-an-address/score"} {
+		if body := get(t, srv, path, 400); body["error"] == nil {
+			t.Errorf("%s: expected an error message, got %+v", path, body)
+		}
+	}
 }
 
 func TestBreakdownServedVerbatim(t *testing.T) {

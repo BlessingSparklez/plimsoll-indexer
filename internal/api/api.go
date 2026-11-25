@@ -38,6 +38,7 @@ type Reader interface {
 	SeriesSupply(ctx context.Context, sac string, from, to time.Time) ([]coverage.Supply, error)
 	SeriesReports(ctx context.Context, sac string, from, to time.Time) ([]coverage.Report, error)
 	Reporters(ctx context.Context) ([]coverage.Reporter, error)
+	Reporter(ctx context.Context, address string) (coverage.Reporter, error)
 	Breakdown(ctx context.Context, hash string) ([]byte, error)
 	Progress(ctx context.Context, name string) (store.Progress, error)
 }
@@ -79,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/assets/{sac}/reports", s.reportHistory)
 	mux.HandleFunc("GET /v1/assets/{sac}/coverage", s.coverageSeries)
 	mux.HandleFunc("GET /v1/reporters", s.reporters)
+	mux.HandleFunc("GET /v1/reporters/{address}", s.reporter)
+	mux.HandleFunc("GET /v1/reporters/{address}/score", s.reporterScore)
 	mux.HandleFunc("GET /v1/breakdowns/{hash}", s.breakdown)
 	mux.HandleFunc("POST /v1/webhooks", s.createWebhook)
 	mux.HandleFunc("GET /v1/webhooks", s.listWebhooks)
@@ -430,6 +433,43 @@ func (s *Server) reporters(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reporters": out})
 }
 
+func (s *Server) reporter(w http.ResponseWriter, r *http.Request) {
+	address, ok := parseReporterAddress(w, r)
+	if !ok {
+		return
+	}
+	rep, err := s.Store.Reporter(r.Context(), address)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "reporter not found")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, reporterJSON{Role: coverage.RoleName(rep.Role), Reporter: rep})
+}
+
+func (s *Server) reporterScore(w http.ResponseWriter, r *http.Request) {
+	address, ok := parseReporterAddress(w, r)
+	if !ok {
+		return
+	}
+	rep, err := s.Store.Reporter(r.Context(), address)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "reporter not found")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"address":          rep.Address,
+		"reputation_score": rep.ReputationScore,
+	})
+}
+
 func (s *Server) breakdown(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
 	if !isBreakdownHash(hash) {
@@ -566,6 +606,18 @@ func parseSAC(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return sac, true
+}
+
+// parseReporterAddress reads the {address} path value and rejects anything that
+// is not an account strkey, so unknown reporters answer 404 instead of passing
+// arbitrary strings through to storage.
+func parseReporterAddress(w http.ResponseWriter, r *http.Request) (string, bool) {
+	address := r.PathValue("address")
+	if !strkey.IsValidEd25519PublicKey(address) {
+		writeError(w, http.StatusBadRequest, "address must be an account strkey")
+		return "", false
+	}
+	return address, true
 }
 
 // requireAsset answers 404 unless the asset is listed, so its history

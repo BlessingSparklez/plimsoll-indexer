@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math/big"
@@ -189,6 +190,58 @@ func TestIssuerTomlSnapshotsDetectChanges(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("stored %d snapshots, want 2", count)
+	}
+}
+
+func TestReporterProfileIncludesReconciledReputationScore(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	address := "GBIE3ANCRVCBWETUZXWYKRMP27LQVJHX757XXAQUT3LYHVTNFPPPXEY4"
+
+	if _, err := s.Reporter(ctx, address); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown reporter: %v, want ErrNotFound", err)
+	}
+
+	added, err := s.SaveChainReporter(ctx, coverage.Reporter{
+		Address: address, Role: coverage.RoleAuditor, Name: "Acme", ReputationScore: 7,
+	})
+	if err != nil || !added {
+		t.Fatalf("save reporter: added=%v err=%v", added, err)
+	}
+	got, err := s.Reporter(ctx, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Role != coverage.RoleAuditor || got.Name != "Acme" || got.ReputationScore != 7 {
+		t.Fatalf("profile = %+v", got)
+	}
+
+	// A score change alone is a change: the profile must not stay stale.
+	added, err = s.SaveChainReporter(ctx, coverage.Reporter{
+		Address: address, Role: coverage.RoleAuditor, Name: "Acme", ReputationScore: 8,
+	})
+	if err != nil || !added {
+		t.Fatalf("update score: added=%v err=%v", added, err)
+	}
+	if got, err = s.Reporter(ctx, address); err != nil || got.ReputationScore != 8 {
+		t.Fatalf("profile after score update = %+v, %v", got, err)
+	}
+
+	// Reporter events do not carry a score, so they must not reset the one the
+	// reconciler read.
+	if err := s.ApplyEvents(ctx, "plimsoll-events", "c1", 5, []any{soroban.ReporterSet{
+		Meta:     soroban.Meta{ID: "reporter-event-1", Ledger: 5, ClosedAt: time.Now().UTC()},
+		Reporter: address, Role: coverage.RoleAuditor, Name: "Acme",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = s.Reporter(ctx, address); err != nil || got.ReputationScore != 8 {
+		t.Fatalf("profile after reporter event = %+v, %v", got, err)
+	}
+
+	list, err := s.Reporters(ctx)
+	if err != nil || len(list) != 1 || list[0].ReputationScore != 8 {
+		t.Fatalf("reporters = %+v, %v", list, err)
 	}
 }
 

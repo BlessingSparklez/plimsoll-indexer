@@ -143,11 +143,12 @@ func (rc *Reconciler) reconcileOne(ctx context.Context, sac, code string) error 
 	return errors.Join(errs...)
 }
 
-// reconcileReporters reads get_reporter for every address the store knows
-// about (from the reporters table and from unique reporter addresses in
-// reserve_reports), and brings the reporters table in line with the chain.
-// Reporters active on-chain are upserted; reporters the chain no longer
-// recognises are marked inactive.
+// reconcileReporters reads get_reporter and get_reporter_score for every
+// address the store knows about (from the reporters table and from unique
+// reporter addresses in reserve_reports), and brings the reporters table in
+// line with the chain. Reporters active on-chain are upserted with their
+// current reputation score; reporters the chain no longer recognises are
+// marked inactive.
 func (rc *Reconciler) reconcileReporters(ctx context.Context) error {
 	known, err := rc.Store.AllReporterAddresses(ctx)
 	if err != nil {
@@ -184,10 +185,21 @@ func (rc *Reconciler) reconcileReporters(ctx context.Context) error {
 			continue
 		}
 		if state != nil {
+			scoreRes, err := rc.Invoker.Read(ctx, rc.LedgerID, "get_reporter_score", []xdr.ScVal{addrVal})
+			if err != nil {
+				errs = append(errs, fmt.Errorf("get_reporter_score %s: %w", addr, err))
+				continue
+			}
+			score, err := soroban.DecodeReporterScore(scoreRes)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("decode get_reporter_score %s: %w", addr, err))
+				continue
+			}
 			added, err := rc.Store.SaveChainReporter(ctx, coverage.Reporter{
-				Address: addr,
-				Role:    state.Role,
-				Name:    state.Name,
+				Address:         addr,
+				Role:            state.Role,
+				Name:            state.Name,
+				ReputationScore: score,
 			})
 			if err != nil {
 				errs = append(errs, err)
@@ -195,7 +207,7 @@ func (rc *Reconciler) reconcileReporters(ctx context.Context) error {
 			}
 			if added {
 				rc.Log.Warn("recovered a reporter from registry contract state that ingestion had missed",
-					"address", addr, "role", coverage.RoleName(state.Role))
+					"address", addr, "role", coverage.RoleName(state.Role), "reputation_score", score)
 			}
 		} else {
 			changed, err := rc.Store.MarkReporterInactive(ctx, addr)

@@ -349,7 +349,7 @@ func (s *Store) queryReports(ctx context.Context, sql string, args ...any) ([]co
 
 func (s *Store) Reporters(ctx context.Context) ([]coverage.Reporter, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT address, role, name, updated_at FROM reporters
+		SELECT address, role, name, reputation_score, updated_at FROM reporters
 		WHERE active ORDER BY role, name`)
 	if err != nil {
 		return nil, err
@@ -359,13 +359,33 @@ func (s *Store) Reporters(ctx context.Context) ([]coverage.Reporter, error) {
 	for rows.Next() {
 		var r coverage.Reporter
 		var role int16
-		if err := rows.Scan(&r.Address, &role, &r.Name, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.Address, &role, &r.Name, &r.ReputationScore, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		r.Role = uint32(role)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Reporter returns one reporter profile, active or revoked, including the
+// reputation score the reconciler last read from the registry. Unknown
+// addresses return ErrNotFound.
+func (s *Store) Reporter(ctx context.Context, address string) (coverage.Reporter, error) {
+	var r coverage.Reporter
+	var role int16
+	err := s.pool.QueryRow(ctx, `
+		SELECT address, role, name, reputation_score, updated_at FROM reporters
+		WHERE address = $1`, address,
+	).Scan(&r.Address, &role, &r.Name, &r.ReputationScore, &r.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return coverage.Reporter{}, ErrNotFound
+	}
+	if err != nil {
+		return coverage.Reporter{}, err
+	}
+	r.Role = uint32(role)
+	return r, nil
 }
 
 // ---- breakdowns and toml --------------------------------------------------
@@ -607,21 +627,23 @@ func (s *Store) ReportReporterAddresses(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
-// SaveChainReporter upserts a reporter read back from the registry contract.
-// It returns true when the row was new or changed (role, name, or active status).
-// updated_ledger is set to 0 because the reconciler reads current state without
-// knowing which specific ledger set it.
+// SaveChainReporter upserts a reporter read back from the registry contract,
+// including the reputation score. It returns true when the row was new or
+// changed (role, name, active status, or score). updated_ledger is set to 0
+// because the reconciler reads current state without knowing which specific
+// ledger set it.
 func (s *Store) SaveChainReporter(ctx context.Context, r coverage.Reporter) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO reporters (address, role, name, active, updated_ledger, updated_at)
-		VALUES ($1, $2, $3, true, 0, now())
+		INSERT INTO reporters (address, role, name, active, reputation_score, updated_ledger, updated_at)
+		VALUES ($1, $2, $3, true, $4, 0, now())
 		ON CONFLICT (address) DO UPDATE
 		SET role = EXCLUDED.role, name = EXCLUDED.name, active = true,
-		    updated_at = now()
+		    reputation_score = EXCLUDED.reputation_score, updated_at = now()
 		WHERE reporters.active = false
 		   OR reporters.role <> EXCLUDED.role
-		   OR reporters.name <> EXCLUDED.name`,
-		r.Address, int16(r.Role), r.Name)
+		   OR reporters.name <> EXCLUDED.name
+		   OR reporters.reputation_score <> EXCLUDED.reputation_score`,
+		r.Address, int16(r.Role), r.Name, r.ReputationScore)
 	if err != nil {
 		return false, fmt.Errorf("save chain reporter: %w", err)
 	}
