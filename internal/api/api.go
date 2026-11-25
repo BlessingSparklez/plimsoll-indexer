@@ -35,6 +35,8 @@ type Reader interface {
 	SupplyHistory(ctx context.Context, sac string, limit int) ([]coverage.Supply, error)
 	LatestReports(ctx context.Context, sac string) (map[uint32]coverage.Report, error)
 	ReportHistory(ctx context.Context, sac string, limit int) ([]coverage.Report, error)
+	SeriesSupply(ctx context.Context, sac string, from, to time.Time) ([]coverage.Supply, error)
+	SeriesReports(ctx context.Context, sac string, from, to time.Time) ([]coverage.Report, error)
 	Reporters(ctx context.Context) ([]coverage.Reporter, error)
 	Breakdown(ctx context.Context, hash string) ([]byte, error)
 	Progress(ctx context.Context, name string) (store.Progress, error)
@@ -75,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/assets/{sac}", s.getAsset)
 	mux.HandleFunc("GET /v1/assets/{sac}/supply", s.supplyHistory)
 	mux.HandleFunc("GET /v1/assets/{sac}/reports", s.reportHistory)
+	mux.HandleFunc("GET /v1/assets/{sac}/coverage", s.coverageSeries)
 	mux.HandleFunc("GET /v1/reporters", s.reporters)
 	mux.HandleFunc("GET /v1/breakdowns/{hash}", s.breakdown)
 	mux.HandleFunc("POST /v1/webhooks", s.createWebhook)
@@ -120,6 +123,22 @@ type assetJSON struct {
 	Coverage *coverageJSON          `json:"coverage"`
 }
 
+// seriesPointJSON is coverage at one instant of a series. Coverage is null
+// when nothing qualified at that instant.
+type seriesPointJSON struct {
+	At       time.Time     `json:"at"`
+	Coverage *coverageJSON `json:"coverage"`
+}
+
+type seriesJSON struct {
+	SAC      string            `json:"sac"`
+	MinTier  string            `json:"min_tier"`
+	Interval string            `json:"interval"`
+	From     time.Time         `json:"from"`
+	To       time.Time         `json:"to"`
+	Points   []seriesPointJSON `json:"points"`
+}
+
 type reporterJSON struct {
 	Role string `json:"role"`
 	coverage.Reporter
@@ -148,10 +167,15 @@ func toReport(r coverage.Report) *reportJSON {
 }
 
 func (s *Server) toCoverage(r *coverage.Result) *coverageJSON {
+	return toCoverageAt(r, s.Now())
+}
+
+// toCoverageAt ages a coverage result relative to now, which for a series is
+// the point's own instant rather than the request time.
+func toCoverageAt(r *coverage.Result, now time.Time) *coverageJSON {
 	if r == nil {
 		return nil
 	}
-	now := s.Now()
 	out := &coverageJSON{
 		Tier:           coverage.TierName(r.Tier),
 		Supply:         r.Supply.String(),
@@ -331,6 +355,66 @@ func (s *Server) reportHistory(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toReport(rep))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reports": out})
+}
+
+func (s *Server) coverageSeries(w http.ResponseWriter, r *http.Request) {
+	sac, ok := parseSAC(w, r)
+	if !ok {
+		return
+	}
+	minTier, ok := parseTier(w, r)
+	if !ok {
+		return
+	}
+	to, ok := parseTimeQuery(w, r, "to", s.Now().UTC())
+	if !ok {
+		return
+	}
+	from, ok := parseTimeQuery(w, r, "from", to.Add(-24*time.Hour))
+	if !ok {
+		return
+	}
+	interval, rawInterval, ok := parseInterval(w, r)
+	if !ok {
+		return
+	}
+	if !from.Before(to) {
+		writeError(w, http.StatusBadRequest, "from must be before to")
+		return
+	}
+	if to.Sub(from)/interval+1 > maxSeriesPoints {
+		writeError(w, http.StatusBadRequest, "range has more than 1000 points; use a larger interval")
+		return
+	}
+	if !s.requireAsset(w, r, sac) {
+		return
+	}
+	supply, err := s.Store.SeriesSupply(r.Context(), sac, from, to)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	reports, err := s.Store.SeriesReports(r.Context(), sac, from, to)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	points := coverage.Series(supply, reports, minTier, from, to, interval)
+	out := seriesJSON{
+		SAC:      sac,
+		MinTier:  coverage.TierName(minTier),
+		Interval: rawInterval,
+		From:     from,
+		To:       to,
+		Points:   make([]seriesPointJSON, 0, len(points)),
+	}
+	for _, p := range points {
+		out.Points = append(out.Points, seriesPointJSON{
+			At:       p.At.UTC(),
+			Coverage: toCoverageAt(p.Coverage, p.At),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) reporters(w http.ResponseWriter, r *http.Request) {
@@ -519,6 +603,54 @@ func parseTier(w http.ResponseWriter, r *http.Request) (uint32, bool) {
 		return 0, false
 	}
 	return uint32(n), true
+}
+
+const (
+	minSeriesInterval = 5 * time.Minute
+	maxSeriesInterval = 7 * 24 * time.Hour
+	maxSeriesPoints   = 1000
+)
+
+// parseTimeQuery reads a UTC RFC 3339 query parameter, falling back to def.
+func parseTimeQuery(w http.ResponseWriter, r *http.Request, name string, def time.Time) (time.Time, bool) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def, true
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, name+" must be an RFC 3339 timestamp")
+		return time.Time{}, false
+	}
+	return t.UTC(), true
+}
+
+// parseInterval reads the series step. Go's duration syntax has no day unit, so
+// a trailing d (as in 7d) is expanded before parsing.
+func parseInterval(w http.ResponseWriter, r *http.Request) (time.Duration, string, bool) {
+	raw := r.URL.Query().Get("interval")
+	if raw == "" {
+		return time.Hour, "1h", true
+	}
+	var (
+		d   time.Duration
+		err error
+	)
+	if days, ok := strings.CutSuffix(raw, "d"); ok {
+		n, convErr := strconv.Atoi(days)
+		if convErr != nil {
+			err = convErr
+		} else {
+			d = time.Duration(n) * 24 * time.Hour
+		}
+	} else {
+		d, err = time.ParseDuration(raw)
+	}
+	if err != nil || d < minSeriesInterval || d > maxSeriesInterval {
+		writeError(w, http.StatusBadRequest, "interval must be between 5m and 7d")
+		return 0, "", false
+	}
+	return d, raw, true
 }
 
 func parseLimit(w http.ResponseWriter, r *http.Request) (int, bool) {

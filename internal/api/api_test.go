@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -40,10 +41,12 @@ func unlistedSAC(t *testing.T) string {
 }
 
 type fake struct {
-	assets  []coverage.Asset
-	supply  map[string]*coverage.Supply
-	reports map[string]map[uint32]coverage.Report
-	bodies  map[string][]byte
+	assets       []coverage.Asset
+	supply       map[string]*coverage.Supply
+	reports      map[string]map[uint32]coverage.Report
+	supplySeries map[string][]coverage.Supply
+	reportSeries map[string][]coverage.Report
+	bodies       map[string][]byte
 }
 
 func (f *fake) Ping(context.Context) error { return nil }
@@ -79,6 +82,12 @@ func (f *fake) ReportHistory(_ context.Context, s string, _ int) ([]coverage.Rep
 		out = append(out, r)
 	}
 	return out, nil
+}
+func (f *fake) SeriesSupply(_ context.Context, s string, _, _ time.Time) ([]coverage.Supply, error) {
+	return f.supplySeries[s], nil
+}
+func (f *fake) SeriesReports(_ context.Context, s string, _, _ time.Time) ([]coverage.Report, error) {
+	return f.reportSeries[s], nil
 }
 func (f *fake) Reporters(context.Context) ([]coverage.Reporter, error) {
 	return []coverage.Reporter{{Address: "GAUD", Role: coverage.RoleAuditor, Name: "Acme"}}, nil
@@ -140,6 +149,20 @@ func serverWithWebhooks(manager WebhookManager, codec *webhook.SecretCodec, toke
 				Tier: coverage.TierIssuerSigned, Amount: big.NewInt(1_020_0000000),
 				AsOf: now.Add(-2 * time.Hour), Reporter: "GISS", DocURI: "https://x",
 			}},
+		},
+		supplySeries: map[string][]coverage.Supply{
+			sac: {
+				{Amount: big.NewInt(1_000_0000000), Ledger: 100, PostedAt: now.Add(-2 * time.Hour)},
+				{Amount: big.NewInt(1_100_0000000), Ledger: 110, PostedAt: now.Add(-30 * time.Minute)},
+			},
+		},
+		reportSeries: map[string][]coverage.Report{
+			sac: {
+				{Tier: coverage.TierIssuerSigned, Amount: big.NewInt(1_020_0000000),
+					AsOf: now.Add(-2 * time.Hour), PostedAt: now.Add(-2 * time.Hour), Reporter: "GISS"},
+				{Tier: coverage.TierAuditorSigned, Amount: big.NewInt(1_200_0000000),
+					AsOf: now.Add(-90 * time.Minute), PostedAt: now.Add(-80 * time.Minute), Reporter: "GAUD"},
+			},
 		},
 		bodies: map[string][]byte{breakdownHash: []byte(`{"total":"1"}`)},
 	}
@@ -249,6 +272,7 @@ func TestMalformedPathIDs(t *testing.T) {
 		"/v1/assets/CNOPE",
 		"/v1/assets/not-a-sac/supply",
 		"/v1/assets/not-a-sac/reports",
+		"/v1/assets/not-a-sac/coverage",
 	} {
 		body := get(t, srv, path, 400)
 		if body["error"] == nil {
@@ -271,6 +295,7 @@ func TestUnlistedPathIDs(t *testing.T) {
 		"/v1/assets/" + unknown,
 		"/v1/assets/" + unknown + "/supply",
 		"/v1/assets/" + unknown + "/reports",
+		"/v1/assets/" + unknown + "/coverage",
 	} {
 		body := get(t, srv, path, 404)
 		if body["error"] != "asset not listed" {
@@ -288,6 +313,113 @@ func TestListedAssetHistory(t *testing.T) {
 	}
 	if got := get(t, srv, "/v1/assets/"+sac+"/reports", 200)["reports"].([]any); len(got) != 1 {
 		t.Fatalf("report history %+v", got)
+	}
+}
+
+func seriesPath(params map[string]string) string {
+	q := url.Values{}
+	for k, v := range params {
+		q.Set(k, v)
+	}
+	return "/v1/assets/" + sac + "/coverage?" + q.Encode()
+}
+
+func TestCoverageSeriesUsesWhatWasKnownAtEachPoint(t *testing.T) {
+	srv := server()
+	defer srv.Close()
+
+	from := now.Add(-3 * time.Hour)
+	body := get(t, srv, seriesPath(map[string]string{
+		"from":     from.Format(time.RFC3339),
+		"to":       now.Format(time.RFC3339),
+		"interval": "1h",
+	}), 200)
+
+	if body["sac"] != sac || body["interval"] != "1h" || body["min_tier"] != "transcribed" {
+		t.Fatalf("series header %+v", body)
+	}
+	points := body["points"].([]any)
+	if len(points) != 4 {
+		t.Fatalf("got %d points, want 4: %+v", len(points), points)
+	}
+
+	point := func(i int) (time.Time, map[string]any) {
+		t.Helper()
+		p := points[i].(map[string]any)
+		at, err := time.Parse(time.RFC3339, p["at"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cov, _ := p["coverage"].(map[string]any)
+		return at, cov
+	}
+
+	if at, _ := point(0); !at.Equal(from) {
+		t.Errorf("first point at %v, want %v", at, from)
+	}
+	if _, cov := point(0); cov != nil {
+		t.Errorf("coverage before the first supply = %+v, want null", cov)
+	}
+	if _, cov := point(1); cov == nil || cov["tier"] != "issuer_signed" || cov["bps"].(float64) != 10_200 {
+		t.Errorf("point 1 = %+v", cov)
+	}
+	if _, cov := point(2); cov == nil || cov["tier"] != "auditor_signed" || cov["bps"].(float64) != 12_000 {
+		t.Errorf("point 2 = %+v", cov)
+	}
+	_, last := point(3)
+	if last == nil || last["supply_ledger"].(float64) != 110 || last["bps"].(float64) != 10_909 {
+		t.Errorf("last point = %+v", last)
+	}
+	if last["supply"] != "11000000000" || last["reserves"] != "12000000000" {
+		t.Errorf("last amounts = %+v", last)
+	}
+	if last["report_age_seconds"].(float64) != 5400 {
+		t.Errorf("report age at its own point = %v", last["report_age_seconds"])
+	}
+	if !strings.HasSuffix(last["supply_posted_at"].(string), "Z") {
+		t.Errorf("supply_posted_at not UTC: %v", last["supply_posted_at"])
+	}
+}
+
+func TestCoverageSeriesMinTierAndDefaults(t *testing.T) {
+	srv := server()
+	defer srv.Close()
+
+	body := get(t, srv, seriesPath(map[string]string{"min_tier": "3"}), 200)
+	points := body["points"].([]any)
+	if len(points) != 25 {
+		t.Fatalf("default series has %d points, want 25", len(points))
+	}
+	if body["interval"] != "1h" {
+		t.Errorf("default interval = %v", body["interval"])
+	}
+	if cov := points[0].(map[string]any)["coverage"]; cov != nil {
+		t.Errorf("first default point = %+v", cov)
+	}
+	last := points[len(points)-1].(map[string]any)["coverage"].(map[string]any)
+	if last["tier"] != "auditor_signed" {
+		t.Errorf("min_tier=3 last point = %+v", last)
+	}
+}
+
+func TestCoverageSeriesRejectsBadParameters(t *testing.T) {
+	srv := server()
+	defer srv.Close()
+
+	for _, params := range []map[string]string{
+		{"interval": "1m"},
+		{"interval": "8d"},
+		{"interval": "soon"},
+		{"interval": "0"},
+		{"from": now.Add(-7 * 24 * time.Hour).Format(time.RFC3339), "to": now.Format(time.RFC3339), "interval": "5m"},
+		{"from": now.Format(time.RFC3339), "to": now.Add(-time.Hour).Format(time.RFC3339)},
+		{"from": "yesterday"},
+		{"to": "2026-10-05"},
+	} {
+		body := get(t, srv, seriesPath(params), 400)
+		if body["error"] == nil {
+			t.Errorf("%+v: expected an error message, got %+v", params, body)
+		}
 	}
 }
 

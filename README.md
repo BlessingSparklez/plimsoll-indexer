@@ -64,6 +64,7 @@ The command fetches the asset's snapshot breakdown from the indexer, verifies th
 | `GET /v1/assets/{sac}?min_tier=1` | One asset, same shape |
 | `GET /v1/assets/{sac}/supply?limit=100` | Supply snapshot history. Each row carries `source`: `event` for a figure decoded from a contract event, with the `tx_hash` that produced it, or `chain` for one recovered from contract state after an ingestion gap, where `tx_hash` is empty. |
 | `GET /v1/assets/{sac}/reports?limit=100` | Reserve report history |
+| `GET /v1/assets/{sac}/coverage?from=&to=&interval=1h&min_tier=1` | Coverage time series. Each point uses the latest supply snapshot and the best report posted at or before it, selected and rounded by the same rules as `coverage()` on-chain. `from` and `to` are RFC 3339 timestamps (default: the last 24 hours); `interval` runs from `5m` to `7d`; a request returns at most 1,000 points. |
 | `GET /v1/reporters` | Active registered reporters |
 | `GET /v1/breakdowns/{hash}` | Exact bytes of a supply breakdown |
 | `POST /v1/webhooks`, `GET /v1/webhooks`, `DELETE /v1/webhooks/{id}` | Manage authenticated issuer TOML change subscriptions |
